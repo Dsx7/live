@@ -6,9 +6,15 @@ interface NavbarProps {
   total: number;
   onToggleSidebar: () => void;
   searchQuery: string;
+  lastUpdated: string;
+  onRefresh: () => void;
+  refreshing: boolean;
 }
 
-export default function Navbar({ onSearch, total, onToggleSidebar, searchQuery }: NavbarProps) {
+export default function Navbar({
+  onSearch, total, onToggleSidebar, searchQuery,
+  lastUpdated, onRefresh, refreshing
+}: NavbarProps) {
   const [query, setQuery] = useState(searchQuery);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -18,6 +24,13 @@ export default function Navbar({ onSearch, total, onToggleSidebar, searchQuery }
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => onSearch(val), 350);
   }, [onSearch]);
+
+  const formattedDate = lastUpdated
+    ? new Date(lastUpdated).toLocaleString('en-US', {
+        month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit'
+      })
+    : '';
 
   return (
     <nav className="navbar">
@@ -47,7 +60,7 @@ export default function Navbar({ onSearch, total, onToggleSidebar, searchQuery }
             id="search-input"
             type="text"
             className="search-input"
-            placeholder="Search 29K+ channels..."
+            placeholder="Search channels..."
             value={query}
             onChange={handleChange}
             autoComplete="off"
@@ -61,8 +74,22 @@ export default function Navbar({ onSearch, total, onToggleSidebar, searchQuery }
       <div className="nav-right">
         <div className="stats-pill">
           <span className="dot-live"></span>
-          <span>{total.toLocaleString()} channels</span>
+          <span>{total.toLocaleString()} ch</span>
         </div>
+
+        {/* Refresh button with last-updated tooltip */}
+        <button
+          className={`btn-refresh ${refreshing ? 'spinning' : ''}`}
+          onClick={onRefresh}
+          disabled={refreshing}
+          title={formattedDate ? `Updated: ${formattedDate}\nClick to refresh now` : 'Refresh playlist'}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+            <polyline points="23 4 23 10 17 10" />
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+          </svg>
+        </button>
+
         <button className="btn-hamburger" onClick={onToggleSidebar} aria-label="Menu">
           <span></span><span></span><span></span>
         </button>

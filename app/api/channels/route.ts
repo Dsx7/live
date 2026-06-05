@@ -1,14 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { parseM3U, getGroups } from '@/lib/parser';
+import { getChannels } from '@/lib/parser';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const group = searchParams.get('group') || 'All';
-  const q = searchParams.get('q') || '';
-  const page = parseInt(searchParams.get('page') || '1');
+  const q     = searchParams.get('q')     || '';
+  const page  = parseInt(searchParams.get('page')  || '1');
   const limit = parseInt(searchParams.get('limit') || '48');
 
-  let channels = parseM3U();
+  const { channels: all, groups, lastUpdated } = await getChannels();
+
+  let channels = all;
 
   if (group && group !== 'All') {
     channels = channels.filter(c => c.group === group);
@@ -22,8 +24,8 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const total = channels.length;
-  const start = (page - 1) * limit;
+  const total     = channels.length;
+  const start     = (page - 1) * limit;
   const paginated = channels.slice(start, start + limit);
 
   return NextResponse.json({
@@ -32,6 +34,7 @@ export async function GET(request: NextRequest) {
     limit,
     pages: Math.ceil(total / limit),
     channels: paginated,
-    groups: getGroups(),
+    groups,
+    lastUpdated,
   });
 }

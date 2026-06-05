@@ -19,22 +19,25 @@ export interface ApiResponse {
   pages: number;
   channels: Channel[];
   groups: GroupInfo[];
+  lastUpdated: string;
 }
 
 export default function HomePage() {
-  const [channels, setChannels] = useState<Channel[]>([]);
-  const [groups, setGroups] = useState<GroupInfo[]>([]);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [pages, setPages] = useState(1);
+  const [channels, setChannels]       = useState<Channel[]>([]);
+  const [groups, setGroups]           = useState<GroupInfo[]>([]);
+  const [total, setTotal]             = useState(0);
+  const [page, setPage]               = useState(1);
+  const [pages, setPages]             = useState(1);
   const [selectedGroup, setSelectedGroup] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading]         = useState(true);
   const [activeChannel, setActiveChannel] = useState<Channel | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
-  const [favorites, setFavorites] = useState<number[]>([]);
-  const [showFavs, setShowFavs] = useState(false);
+  const [viewMode, setViewMode]       = useState<'grid' | 'list'>('grid');
+  const [favorites, setFavorites]     = useState<number[]>([]);
+  const [showFavs, setShowFavs]       = useState(false);
+  const [lastUpdated, setLastUpdated] = useState('');
+  const [refreshing, setRefreshing]   = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   // Load favorites from localStorage
@@ -55,7 +58,12 @@ export default function HomePage() {
     saveFavorites(updated);
   };
 
-  const fetchChannels = useCallback(async (p = 1, group = selectedGroup, q = searchQuery, favs = showFavs) => {
+  const fetchChannels = useCallback(async (
+    p = 1,
+    group = selectedGroup,
+    q = searchQuery,
+    favs = showFavs
+  ) => {
     if (abortRef.current) abortRef.current.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -63,10 +71,10 @@ export default function HomePage() {
     setLoading(true);
     try {
       const params = new URLSearchParams({
-        page: String(p),
+        page:  String(p),
         limit: '48',
         group: favs ? 'All' : group,
-        q: q,
+        q,
       });
       const res = await fetch(`/api/channels?${params}`, { signal: ctrl.signal });
       const data: ApiResponse = await res.json();
@@ -81,6 +89,7 @@ export default function HomePage() {
       setPages(data.pages);
       setPage(p);
       if (data.groups.length > 0) setGroups(data.groups);
+      if (data.lastUpdated) setLastUpdated(data.lastUpdated);
     } catch (e: unknown) {
       if ((e as Error).name !== 'AbortError') console.error(e);
     } finally {
@@ -89,9 +98,18 @@ export default function HomePage() {
   }, [selectedGroup, searchQuery, showFavs, favorites]);
 
   // Initial load
-  useEffect(() => {
-    fetchChannels(1, 'All', '');
-  }, []);
+  useEffect(() => { fetchChannels(1, 'All', ''); }, []);
+
+  // Manual refresh — hits /api/refresh (POST) then reloads channels
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await fetch('/api/refresh', { method: 'POST' });
+      await fetchChannels(1, selectedGroup, searchQuery, showFavs);
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const handleGroupSelect = (group: string) => {
     setShowFavs(false);
@@ -128,6 +146,9 @@ export default function HomePage() {
         total={total}
         onToggleSidebar={() => setSidebarOpen(v => !v)}
         searchQuery={searchQuery}
+        lastUpdated={lastUpdated}
+        onRefresh={handleRefresh}
+        refreshing={refreshing}
       />
 
       <div className="app-body">
@@ -171,9 +192,7 @@ export default function HomePage() {
 
       <BottomNav
         onHome={() => handleGroupSelect('All')}
-        onSearch={() => {
-          document.getElementById('search-input')?.focus();
-        }}
+        onSearch={() => { document.getElementById('search-input')?.focus(); }}
         onCategories={() => setSidebarOpen(v => !v)}
         onFavorites={handleShowFavs}
         showFavs={showFavs}
