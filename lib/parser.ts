@@ -1,12 +1,16 @@
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+
 /**
  * Remote M3U parser — truly automatic daily refresh.
  *
  * How it works:
- *  1. On first import (server startup), immediately fetches the playlist.
- *  2. A background setInterval fires every 24 hours to re-fetch — no user
- *     request needed to trigger the update.
- *  3. getChannels() always returns from the in-memory cache instantly.
- *  4. If the background fetch fails, the previous good cache is kept.
+ *  1. On first import (server startup), tries to load from disk cache.
+ *  2. If disk cache is missing/stale, fetches the playlist from GitHub.
+ *  3. A background setInterval fires every 24 hours to re-fetch.
+ *  4. getChannels() always returns from the in-memory cache instantly if available.
+ *  5. File-based cache in /tmp ensures persistence across serverless cold starts.
  *
  * Source: https://github.com/sm-monirulislam/SM-Live-TV
  */
@@ -15,6 +19,7 @@ const PLAYLIST_URL =
   'https://raw.githubusercontent.com/sm-monirulislam/SM-Live-TV/refs/heads/main/Combined_Live_TV.m3u';
 
 const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const CACHE_FILE = path.join(os.tmpdir(), 'streamvault_cache.json');
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,8 +51,35 @@ interface Cache {
 // ─── Module state ─────────────────────────────────────────────────────────────
 
 let _cache: Cache | null = null;
-let _fetching = false;                // prevent concurrent fetches
+let _fetchingPromise: Promise<void> | null = null;
 let _timer: ReturnType<typeof setInterval> | null = null;
+
+// ─── Disk Cache ───────────────────────────────────────────────────────────────
+
+function saveCacheToFile(cache: Cache) {
+  try {
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(cache), 'utf-8');
+  } catch (err) {
+    console.error('[StreamVault] ❌ Failed to save cache to file:', err);
+  }
+}
+
+function loadCacheFromFile(): Cache | null {
+  try {
+    if (fs.existsSync(CACHE_FILE)) {
+      const data = fs.readFileSync(CACHE_FILE, 'utf-8');
+      const cache = JSON.parse(data);
+      console.log(`[StreamVault] 💾 Loaded ${cache.channels.length} channels from disk cache.`);
+      return cache;
+    }
+  } catch (err) {
+    console.error('[StreamVault] ❌ Failed to load cache from file:', err);
+  }
+  return null;
+}
+
+// Try to load immediately on module load
+_cache = loadCacheFromFile();
 
 // ─── Emoji map ────────────────────────────────────────────────────────────────
 
@@ -132,45 +164,52 @@ function buildGroups(channels: Channel[]): GroupInfo[] {
 // ─── Core fetch (runs in background) ─────────────────────────────────────────
 
 async function fetchAndCache(): Promise<void> {
-  if (_fetching) return; // skip if a fetch is already in progress
-  _fetching = true;
+  // If already fetching, return the existing promise
+  if (_fetchingPromise) return _fetchingPromise;
 
-  const label = new Date().toLocaleString('en-US', { timeZone: 'Asia/Dhaka' });
-  console.log(`[StreamVault] 🔄 Fetching playlist… (${label} BD time)`);
+  _fetchingPromise = (async () => {
+    const label = new Date().toLocaleString('en-US', { timeZone: 'Asia/Dhaka' });
+    console.log(`[StreamVault] 🔄 Fetching playlist… (${label} BD time)`);
 
-  try {
-    const res = await fetch(PLAYLIST_URL, {
-      headers: { 'User-Agent': 'StreamVault/1.0' },
-      cache: 'no-store',
-    });
+    try {
+      const res = await fetch(PLAYLIST_URL, {
+        headers: { 'User-Agent': 'StreamVault/1.0' },
+        cache: 'no-store',
+      });
 
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
 
-    const text      = await res.text();
-    const channels  = parseM3UContent(text);
-    const groups    = buildGroups(channels);
-    const now       = Date.now();
+      const text      = await res.text();
+      const channels  = parseM3UContent(text);
+      const groups    = buildGroups(channels);
+      const now       = Date.now();
 
-    _cache = {
-      channels,
-      groups,
-      fetchedAt:   now,
-      lastUpdated: new Date(now).toISOString(),
-      nextRefresh: new Date(now + REFRESH_INTERVAL_MS).toISOString(),
-    };
+      const newCache = {
+        channels,
+        groups,
+        fetchedAt:   now,
+        lastUpdated: new Date(now).toISOString(),
+        nextRefresh: new Date(now + REFRESH_INTERVAL_MS).toISOString(),
+      };
 
-    console.log(
-      `[StreamVault] ✅ Loaded ${channels.length} channels in ${groups.length} groups.` +
-      ` Next auto-refresh: ${new Date(now + REFRESH_INTERVAL_MS).toLocaleString('en-US', { timeZone: 'Asia/Dhaka' })} BD time`
-    );
-  } catch (err) {
-    console.error('[StreamVault] ❌ Fetch failed:', err);
-    if (_cache) {
-      console.warn('[StreamVault] ⚠️  Keeping previous cache as fallback');
+      _cache = newCache;
+      saveCacheToFile(newCache);
+
+      console.log(
+        `[StreamVault] ✅ Loaded ${channels.length} channels in ${groups.length} groups.` +
+        ` Next auto-refresh: ${new Date(now + REFRESH_INTERVAL_MS).toLocaleString('en-US', { timeZone: 'Asia/Dhaka' })} BD time`
+      );
+    } catch (err) {
+      console.error('[StreamVault] ❌ Fetch failed:', err);
+      if (_cache) {
+        console.warn('[StreamVault] ⚠️  Keeping previous cache as fallback');
+      }
+    } finally {
+      _fetchingPromise = null;
     }
-  } finally {
-    _fetching = false;
-  }
+  })();
+
+  return _fetchingPromise;
 }
 
 // ─── Background scheduler ─────────────────────────────────────────────────────
@@ -179,8 +218,10 @@ async function fetchAndCache(): Promise<void> {
 function startBackgroundScheduler(): void {
   if (_timer) return; // already running
 
-  // 1️⃣  Fetch immediately on startup
-  fetchAndCache();
+  // 1️⃣  Fetch immediately on startup if cache is missing
+  if (!_cache) {
+    fetchAndCache();
+  }
 
   // 2️⃣  Then repeat every 24 hours — truly automatic, no user request needed
   _timer = setInterval(() => {
@@ -213,13 +254,13 @@ export async function getChannels(): Promise<{
   groups: GroupInfo[];
   lastUpdated: string;
 }> {
-  // Wait for the initial fetch if cache isn't ready yet
+  // Wait for the initial fetch if cache isn't ready yet (neither in memory nor on disk)
   if (!_cache) {
     console.log('[StreamVault] Cache cold — waiting for initial fetch…');
     await fetchAndCache();
   }
 
-  // At this point _cache is guaranteed to be set (or throw happened above)
+  // At this point _cache is set if fetch succeeded, or was loaded from disk
   if (!_cache) throw new Error('Playlist unavailable — fetch failed on startup');
 
   return {
